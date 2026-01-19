@@ -42,27 +42,29 @@ def seed_everything(seed=11711):
 
 
 class WarmupLearningRateScheduler:
-	"""Linear warmup scheduler that falls back to a constant learning rate."""
+    """Linear warmup scheduler that falls back to a constant learning rate."""
 
-	def __init__(self, base_lr: float, warmup_steps: int):
-		self.base_lr = base_lr
-		self.warmup_steps = max(0, warmup_steps)
+    def __init__(self, base_lr: float, warmup_steps: int):
+        self.base_lr = base_lr
+        self.warmup_steps = max(0, warmup_steps)
 
-	def lr_at_step(self, step: int) -> float:
-		#TODO
-		# ====================== Implement lr_at_step here ======================
-		# Implement a linear warmup learning rate scheduler.
-		#
-		# Args:
-		#     step (int): Current training step (0-indexed)
-		#
-		# Returns:
-		#     float: Learning rate for the given step
-		pass
-		# ====================== Implement lr_at_step here ======================
+    def lr_at_step(self, step: int) -> float:
+        # ====================== Implement lr_at_step here ======================
+        # Implement a linear warmup learning rate scheduler.
+        #
+        # Args:
+        #     step (int): Current training step (0-indexed)
+        #
+        # Returns:
+        #     float: Learning rate for the given step
+        if step >= self.warmup_steps:
+            return self.base_lr
+        else:
+             return self.base_lr * step / self.warmup_steps
+        # ====================== Implement lr_at_step here ======================
 
-	def __call__(self, step: int) -> float:
-		return self.lr_at_step(step)
+    def __call__(self, step: int) -> float:
+        return self.lr_at_step(step)
 
 class PretrainingSequenceDataset(Dataset):
 	def __init__(self, data_dir: Path, metadata: dict, block_size: int):

@@ -98,9 +98,23 @@ class Attention(nn.Module):
         So you should not look at future tokens when computing the attention scores.
         '''
         
-        #TODO
+        #OVER
         # ====================== Implement compute_query_key_value_scores here ======================
-        pass
+        # Q  @ K^T / sqrt{d} @ V
+        bs, n_local_heads, seqlen, head_dim = query.shape
+        scaling_factor = head_dim ** 0.5
+        query_scaled = query * scaling_factor
+        
+        attention_scores = torch.matmul(query, key.transpose(-2, -1))
+        mask = torch.triu(torch.ones(seqlen, seqlen), diagonal=1).to(attention_scores.device)
+        attention_scores = attention_scores.masked_fill(mask == 1, float('-inf'))  # Mask future tokens
+        
+        attention_probs = F.softmax(attention_scores, dim=-1)
+        
+        if self.attn_dropout is not None:
+            attention_probs = self.attn_dropout(attention_probs)
+        
+        return torch.matmul(attention_probs, value)
         # ====================== Implement compute_query_key_value_scores here ======================
 
 
@@ -284,9 +298,8 @@ class Llama(LlamaPreTrainedModel):
             logits_last = logits[:, -1, :]
             if temperature == 0.0:
                 # select the single most likely index
-                #TODO
                 # ====================== Implement greedy sampling here ======================
-                pass
+                idx_next = logits_last.argmax(dim=-1, keepDim=True)
                 # ====================== Implement greedy sampling here ======================
             else:
                 '''
@@ -296,16 +309,19 @@ class Llama(LlamaPreTrainedModel):
                 3) normalize the scaled logits with a softmax to obtain scaled probabilities.
                 4) sample from the scaled probability distribution.
                 '''
-                logits_work = logits_last
+                logits_work = logits_last  / temperature
                 if top_k is not None:
-                    #TODO
                     # ====================== Implement top-k sampling here ======================
-                    pass
+                    # Top-k sampling: Set logits outside top-k tokens to a very small value
+                    values, indices = torch.topk(logits_work, top_k)
+                    logits_work = torch.full_like(logits_work, float('-inf'))  # Reset logits to -inf
+                    logits_work.scatter_(dim=-1, index=indices, value=values)  # Keep top-k logits intact
                     # ====================== Implement top-k sampling here ======================
 
-                #TODO
                 # ====================== Implement temperature sampling here ======================
-                pass
+                probs = F.softmax(logits_work, dim=-1)
+                # 在这个概率分布下，随机选择了哪个token的索引
+                idx_next = torch.multinomial(probs, 1) 
                 # ====================== Implement temperature sampling here ======================
 
             # append sampled index to the running sequence and continue
