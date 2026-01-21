@@ -1,6 +1,6 @@
 
 # If you don't want to use WANDB for logging, simply ignore this line and the script will still print out metrics
-export WANDB_API_KEY=YOUR_WANDB_API_KEY
+export WANDB_API_KEY=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
 
 
 python run_llama.py \

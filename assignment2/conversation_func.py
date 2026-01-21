@@ -34,6 +34,10 @@ def conversation_to_features(
     max_length: int,
     truncation: str,
 ) -> Optional[Dict[str, torch.Tensor]]:
+    '''
+    :param messages: 每个 dict 表示一条对话消息
+    :type messages: List[Dict[str, str]]
+    '''
     if not messages:
         return None
 
@@ -60,11 +64,18 @@ def conversation_to_features(
         if isinstance(partial, torch.Tensor):
             partial = partial.tolist()
         prefix_lengths.append(len(partial))
+    # 之后，prefix_lengths[i] 表示从位置
+    # 为什么需要这样？tokenizer 里没有接口告诉你“这些 token 属于哪条 message”
+    # 用“长度差”来反推边界
+    # eg:
+    # full_ids = | system tokens | user tokens | assistant tokens | user tokens | assistant tokens |
+    #              0           5               8                 12            ...
+    
 
     # Please implement from here
     # Start with everything masked out; fill tokens as needed per exercise.
     labels = [IGNORE_TOKEN_ID] * len(full_ids)
-    attention = [1] * len(full_ids)
+    attention = [1] * len(full_ids) # 后面如果有 padding，才会把 padding 的位置改成 0
 
     if is_single_turn_conversation(messages):
         # ------------------------------------------------------------------
@@ -72,8 +83,8 @@ def conversation_to_features(
         #
         # Goal:
         #   Fill `labels` so that only the assistant response contributes to
-        #   the loss for conversations containing exactly one system message
-        #   (optional), one user message, and one assistant message.
+        #   the loss for conversations containing **exactly one system message
+        #   (optional), one user message, and one assistant message.**
         #
         # Requirements:
         #   1. Leave system and user tokens masked out (i.e. keep
@@ -89,7 +100,10 @@ def conversation_to_features(
         #   - `prefix_lengths[i]` gives the token count up through
         #     `messages[i]`.
         #
-        raise NotImplementedError("Exercise 1: implement the single-turn loss mask.")
+        assistant_idx = len(messages) - 1
+        start = prefix_lengths[assistant_idx - 1]
+        end = prefix_lengths[assistant_idx]
+        labels[start:end] = full_ids[start:end]
     else:
         # ------------------------------------------------------------------
         # Exercise 2: Multi-turn loss mask
@@ -111,8 +125,27 @@ def conversation_to_features(
         #   - Reuse or extend the helper logic you wrote for Exercise 1.
         #   - The code that follows assumes `labels` already reflect your
         #     masking decisions.
-        #
-        raise NotImplementedError("Exercise 2: extend the loss mask to multi-turn conversations.")
+
+        # prefix_lengths[i] 可能大于 len(full_ids)
+        # 情况 1（最常见 & 最重要）：chat template 内部有长度裁剪 / 特殊处理
+        # 情况 2：chat template 在末尾追加 token（但 full_ids 被截断）
+        # 情况 3：tokenizer 返回 tensor / list 行为不一致（边缘但真实） 啊，那我用它的id_pos也不能对照啊
+
+        n = len(full_ids)
+        for i, msg in enumerate(messages):
+            if msg.get("role") != "assistant":
+                continue
+            
+            raw_start = 0 if i == 0 else prefix_lengths[i - 1]
+            raw_end = prefix_lengths[i]
+            
+            start = min(raw_start, n)
+            end = min(raw_end, n)
+            
+            if start >= end:
+                continue
+            
+            labels[start:end] = full_ids[start:end]
 
     if len(full_ids) > max_length:
         if truncation == "left":
