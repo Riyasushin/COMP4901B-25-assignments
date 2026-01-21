@@ -59,4 +59,42 @@ def cross_entropy_loss(
     Returns:
         Scalar tensor representing the mean loss over non-ignored tokens.
     """
-    raise NotImplementedError("Implement token-level cross-entropy using the logits.")
+    
+    assert logits.ndim == 3
+    assert labels.ndim == 2
+    assert logits.shape[:2] == labels.shape
+    
+    B, seq_len, vocab_size = logits.shape
+    device = logits.device
+    dtype = logits.dtype
+    
+    shift_logits = logits[:, :-1, :]
+    shift_labels = labels[:, 1:]
+    
+    valid_mask = shift_labels.ne(IGNORE_TOKEN_ID)
+    
+    if not torch.any(valid_mask):
+        # 否则会除 0
+        return torch.zeros((), device=logits.device, dtype=logits.dtype)
+    
+    max_logits = shift_logits.max(dim=-1, keepdim=True).values
+    log_sum_exp = torch.log(torch.exp(shift_logits - max_logits).sum(dim=-1, keepdim=True)) + max_logits
+    log_probs = shift_logits - log_sum_exp
+    
+    # shift_labels 里有 -100，直接拿去 gather 会报错, 把被 mask 的位置临时改成 0（反正后面会乘 mask 清零）
+    safe_labels = torch.where(valid_mask, shift_labels, torch.zeros_like(shift_labels))
+    gold_log_probs = log_probs.gather(dim=-1, index=safe_labels.unsqueeze(-1)).squeeze(-1)
+    
+    nll = -gold_log_probs
+    # 不参与的位置清零
+    nll = nll * valid_mask.to(dtype)
+
+    loss_sum = nll.sum()
+    
+    denom = max(int(num_items_in_batch), 1)
+    loss = loss_sum / denom
+
+    return loss
+
+
+
