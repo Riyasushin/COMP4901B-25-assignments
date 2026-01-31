@@ -1,4 +1,4 @@
-export WANDB_API_KEY=""
+export WANDB_API_KEY="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"
 
 export WANDB_PROJECT="COMP4901B-Homework2"
 RUNNAME="HW2"
