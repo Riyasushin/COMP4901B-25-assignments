@@ -62,9 +62,49 @@ def estimate_pass_at_k(
     #
     # Expected return: numpy array with one pass@k value per problem
     # =======================================================================
-    pass_at_k_values = np.array([0.0])  # Replace this line with your implementation
+
+    num_correct = np.asarray(num_correct, dtype=np.int64)
+
+    # 支持 num_samples 是标量或数组
+    if isinstance(num_samples, (list, np.ndarray)):
+        num_samples = np.asarray(num_samples, dtype=np.int64)
+        if len(num_samples) != len(num_correct):
+            raise ValueError("num_samples 与 num_correct 长度不一致")
+        n = num_samples
+    else:
+        n = np.full_like(num_correct, int(num_samples), dtype=np.int64)
+
+    # k 不能超过 n
+    k_eff = np.minimum(k, n)
+
+    pass_at_k = np.zeros_like(n, dtype=np.float64)
+
+    wrong = n - num_correct
+
+    # 情况 1：没有正确答案
+    mask_zero = (num_correct <= 0) | (k_eff <= 0)
+    pass_at_k[mask_zero] = 0.0
+
+    # 情况 2：错误样本不足 k 个 → 必过
+    mask_one = (~mask_zero) & (wrong < k_eff)
+    pass_at_k[mask_one] = 1.0
+
+    # 情况 3：正常情况
+    mask = (~mask_zero) & (~mask_one)
+    if np.any(mask):
+        n_m = n[mask].astype(np.float64)
+        wrong_m = wrong[mask].astype(np.float64)
+        k_m = k_eff[mask].astype(np.int64)
+
+        prob_all_wrong = np.ones_like(n_m)
+        for i in range(int(np.max(k_m))):
+            active = (i < k_m)
+            prob_all_wrong[active] *= (wrong_m[active] - i) / (n_m[active] - i)
+
+        pass_at_k[mask] = 1.0 - prob_all_wrong
+    
     # =======================================================================
-    return pass_at_k_values
+    return pass_at_k
 
 def load_jsonl_data(jsonl_path: str):
     """Load and validate JSONL data from inference output."""
@@ -84,6 +124,7 @@ def load_jsonl_data(jsonl_path: str):
         return data
     except Exception as e:
         raise Exception(f"Error loading JSONL file: {str(e)}")
+
 
 def extract_solution(solution_str: str) -> Optional[str]:
     """Extract the answer from the solution string.
@@ -116,9 +157,23 @@ def extract_solution(solution_str: str) -> Optional[str]:
     # - For \\boxed{}: r'\\boxed\{([^}]+)\}' captures content inside \boxed{}
     # - For numbers: r'(\-?[0-9\.\,]+)' matches integers, decimals, negative numbers
     # =======================================================================
-    extracted_solution = None  # Replace this line with your implementation
+    assert solution_str is not None, "solution is None"
+    
+    boxed_all = re.findall(r'\\boxed\{([^}]+)\}', solution_str)
+    if boxed_all:
+        cand = boxed_all[-1].strip()
+        cand = cand.replace('$', '').replace(',', '').strip()
+        cand = cand.rstrip('.,;:')
+        return cand if cand else None
+    
+    matches = re.findall(r'(-?\d[\d,]*\.?\d*)', solution_str)
+    if not matches:
+        return None
+    
+    ans = matches[-1].replace(',', '').rstrip('.,;:')
+    return ans if ans else None
+        
     # =======================================================================
-    return extracted_solution
 
 
 def compute_score(solution_str: str, ground_truth: str) -> int:
@@ -146,7 +201,19 @@ def compute_score(solution_str: str, ground_truth: str) -> int:
     #
     # Hint: Some answers might not be valid numbers, handle ValueError gracefully
     # =======================================================================
-    is_correct = 0  # Replace this line with your implementation
+    if answer is None:
+        is_correct = 0
+    else:
+        try:
+            pred = str(float(answer.strip()))
+            gt = str(float(str(ground_truth).strip()))
+            
+            if gt == pred:
+                is_correct = 1
+            else:
+                is_correct = 0
+        except (ValueError, TypeError):
+            return 0
     # =======================================================================
     return is_correct
 

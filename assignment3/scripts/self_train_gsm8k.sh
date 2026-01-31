@@ -2,7 +2,7 @@
 
 # GSM8K Self-Improving Training Pipeline
 # Usage: bash self_train_gsm8k.sh <initial_model_path> [options]
-
+set -euo pipefail
 set -e  # Exit on error
 
 # Parse arguments

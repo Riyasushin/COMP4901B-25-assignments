@@ -126,6 +126,40 @@ def format_prompts(
     # Hint: The chat template transforms messages into the model's expected format
     # (e.g., "<|im_start|>user\n{content}<|im_end|>" for Qwen models)
     # =======================================================================
+    PROMPT_TEMPLATE = FEW_SHOT_PROMPT if use_few_shot else ZERO_SHOT_PROMPT
+    for q in questions:
+        raw_prompt = PROMPT_TEMPLATE.format(question=q)
+        if use_chat_template:
+            assert tokenizer is not None
+            messages = []
+            if system_message:
+                messages.append({"role": "system", "content": system_message})
+            messages.append({"role": "user", "content": raw_prompt})
+            
+            try:
+                # Qwen3 supports enable_thinking via apply_chat_template in many versions.
+                chat_prompt = tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                    enable_thinking=enable_thinking,
+                )
+                formatted_prompts.append(chat_prompt)
+            except TypeError:
+                chat_prompt = tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+                formatted_prompts.append(chat_prompt)
+            except Exception as e:
+                logger.warning(
+                    f'Failed to apply chat template; using raw prompt. Error: {e}'
+                )
+        else:
+            # don't use_chat_template
+            formatted_prompts.append(raw_prompt)
+    
     return formatted_prompts
 
 
@@ -237,6 +271,21 @@ def run_inference(
     # Hint: Check the VLLM documentation for LLM and SamplingParams classes
     # can refer to https://docs.vllm.ai/en/stable/getting_started/quickstart.html
     # =======================================================================
+    llm = LLM(
+        model=model_path,
+        tensor_parallel_size=tensor_parallel_size,
+        gpu_memory_utilization=gpu_memory_utilization,
+        trust_remote_code=True,
+    )
+    
+    sampling_params = SamplingParams(
+        max_tokens=max_tokens,
+        temperature=temperature,
+        top_p=top_p,
+        top_k=top_k,
+        n=n_rollouts,
+    )
+    outputs = llm.generate(formatted_prompts, sampling_params)
 
 
     # Save results

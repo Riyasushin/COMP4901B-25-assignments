@@ -424,6 +424,17 @@ class LoRAAdapterManager:
         # Hint: Look at the imports at the top of this file
         # =======================================================================
 
+        # 用 PEFT 将 LoRA 注入到指定 target_modules
+        self.model = get_peft_model(self.model, lora_config)
+
+        # 可选：打印可训练参数比例，方便检查 LoRA 是否生效
+        if self.local_rank in (None, -1, 0):
+            try:
+                self.model.print_trainable_parameters()
+            except Exception:
+                pass
+            
+        
         return self.model
 
     def _resolve_lora_target_modules(self) -> List[str]:
@@ -460,9 +471,120 @@ class LoRAAdapterManager:
         """
         # ==================== TODO: Implement this method ====================
 
+        model_type = getattr(getattr(self.model, "config", None), "model_type", None)
+        model_type = (model_type or "").lower()
+
+        # 1) 扫描所有线性层，收集 leaf 名字（PEFT 目标通常用 leaf 名字匹配）
+        linear_leaf_names = set()
+        linear_full_names = []
+        for name, module in self.model.named_modules():
+            if isinstance(module, nn.Linear):
+                linear_full_names.append(name)
+                linear_leaf_names.add(name.split(".")[-1])
+
+        if self.local_rank in (None, -1, 0):
+            rank0_print(f"[LoRA] model_type={model_type or 'unknown'}")
+            rank0_print(f"[LoRA] nn.Linear count={len(linear_full_names)}, "
+                        f"unique leaf names={len(linear_leaf_names)}")
+            
+        def _dedup_keep_order(xs: List[str]) -> List[str]:
+            seen = set()
+            out = []
+            for x in xs:
+                if x not in seen:
+                    seen.add(x)
+                    out.append(x)
+            return out
+
+        def _intersect_existing(candidates: List[str]) -> List[str]:
+            """只保留模型真实存在的 linear leaf name"""
+            return _dedup_keep_order([c for c in candidates if c in linear_leaf_names])
+        
+        # 常见候选名（不同架构差异很大，先列“通用集合”，最后与现有层求交集）
+        attn_candidates = [
+            "q_proj", "k_proj", "v_proj", "o_proj", "out_proj",
+            "c_attn", "c_proj",              # GPT-2 风格
+            "query_key_value", "dense",      # NeoX/Falcon/Bloom 等常见
+            "Wqkv", "wo",                    # 一些实现会出现
+        ]
+        ffn_candidates = [
+            "gate_proj", "up_proj", "down_proj",  # LLaMA/Mistral/Qwen/Gemma 常见
+            "fc1", "fc2",                         # OPT 常见
+            "c_fc", "c_proj",                     # GPT-2 MLP
+            "dense_h_to_4h", "dense_4h_to_h",     # NeoX 风格
+            "w1", "w2", "w3",                     # 某些实现会用
+        ]
+        
+        # 2) 处理用户显式指定 --lora_target_modules
+        user_spec = (self.lora_args.lora_target_modules or "").strip()
+        if user_spec:
+            spec = user_spec.lower().strip()
+
+            if spec in {"attn", "attention"}:
+                chosen = _intersect_existing(attn_candidates)
+            elif spec in {"ffn", "mlp"}:
+                chosen = _intersect_existing(ffn_candidates)
+            elif spec in {"attn_ffn", "attn+ffn"}:
+                chosen = _intersect_existing(attn_candidates + ffn_candidates)
+            elif spec == "all":
+                # 叶子名层面无法精确排除所有 head，但通常 lm_head 不想训
+                chosen = sorted(list(linear_leaf_names - {"lm_head", "embed_out"}))
+            else:
+                # 逗号分隔的显式列表
+                raw = [s.strip() for s in user_spec.split(",") if s.strip()]
+                chosen = _intersect_existing(raw)
+
+            if chosen:
+                if self.local_rank in (None, -1, 0):
+                    rank0_print(f"[LoRA] Using user targets: {chosen}")
+                return chosen
+            else:
+                rank0_print(f"[LoRA] WARNING: user targets '{user_spec}' matched nothing, "
+                            "falling back to auto selection.")
+        
+        # 3) 按架构给默认候选（再与实际 linear 取交集确保可用）
+        chosen: List[str] = []
+        
+        # LLaMA/Mistral/Gemma/Qwen(含 qwen3) HF 实现通常用这些命名
+        if model_type in {"llama", "mistral", "mixtral", "gemma", "gemma2", "qwen", "qwen2", "qwen3"}:
+            preferred = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+            chosen = _intersect_existing(preferred)
+            if not chosen:
+                preferred2 = ["q_proj", "k_proj", "v_proj", "out_proj", "gate_proj", "up_proj", "down_proj"]
+                chosen = _intersect_existing(preferred2)
+
+        elif model_type == "opt":
+            preferred = ["q_proj", "k_proj", "v_proj", "out_proj", "fc1", "fc2"]
+            chosen = _intersect_existing(preferred)
+
+        elif model_type == "gpt2":
+            preferred = ["c_attn", "c_proj", "c_fc"]
+            chosen = _intersect_existing(preferred)
+
+        elif model_type in {"gpt_neox", "gptj"}:
+            preferred = ["query_key_value", "dense", "dense_h_to_4h", "dense_4h_to_h"]
+            chosen = _intersect_existing(preferred)
+
+        elif model_type in {"falcon", "bloom"}:
+            preferred = ["query_key_value", "dense"]
+            chosen = _intersect_existing(preferred)
+
+        else:
+            # 通用兜底：先用常见 attn+ffn 名称，仍不行就训“全部线性层叶子名”
+            chosen = _intersect_existing(attn_candidates + ffn_candidates)
+            if not chosen:
+                chosen = sorted(list(linear_leaf_names - {"lm_head", "embed_out"}))
+                
+        if not chosen:
+            raise RuntimeError(
+                "无法自动解析 LoRA target modules。建议打印 linear_leaf_names 后，"
+                "通过 --lora_target_modules 显式指定。"
+            )
+
+        if self.local_rank in (None, -1, 0):
+            rank0_print(f"[LoRA] Auto-selected targets: {chosen}")  
+        return chosen  
         # =====================================================================
-        valid_targets = []  # Replace with your implementation
-        return valid_targets
 
 
 def _find_lora_adapter_dirs(root: pathlib.Path) -> List[pathlib.Path]:
@@ -586,6 +708,17 @@ def train():
         local_rank=local_rank,
     )
     model = lora_manager.apply_adapters()
+    
+    # FIXME
+    if training_args.gradient_checkpointing:
+        model.gradient_checkpointing_enable()
+        model.enable_input_require_grads()
+
+    # Debug: ensure LoRA created trainable params
+    num_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    rank0_print(f"[DEBUG] trainable params: {num_trainable}")
+    if num_trainable == 0:
+        raise RuntimeError("No trainable parameters after applying LoRA. Check lora_target_modules and PEFT application.")
 
     tokenizer = transformers.AutoTokenizer.from_pretrained(
         model_args.model_name_or_path,
